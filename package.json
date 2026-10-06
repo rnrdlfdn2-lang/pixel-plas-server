@@ -1,34 +1,9 @@
 {
-  "name": "pixel-pals",
-  "version": "0.2.0",
-  "description": "Friends-only pixel overlay chat",
-  "author": "Pixel Pals",
-  "main": "main.js",
-  "scripts": {
-    "start": "electron .",
-    "server": "node server/server.js",
-    "dist": "electron-builder --publish never",
-    "dist:win": "electron-builder --win --publish never",
-    "dist:mac": "electron-builder --mac --publish never"
-  },
-  "dependencies": { "ws": "^8.18.0" },
-  "devDependencies": { "electron": "^44.5.1", "electron-builder": "^26.15.3" },
-  "build": {
-    "appId": "com.pixelpals.app",
-    "productName": "Pixel Pals",
-    "directories": { "output": "dist", "buildResources": "build" },
-    "files": ["main.js", "preload.js", "config.json", "icon.png", "renderer/**", "settings/**", "history/**", "composer/**", "shared/**", "package.json"],
-    "artifactName": "PixelPals-${version}-${os}-${arch}.${ext}",
-    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
-    "nsis": { "oneClick": true, "perMachine": false, "deleteAppDataOnUninstall": false },
-    "mac": {
-      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
-      "category": "public.app-category.social-networking",
-      "identity": "-",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
-    }
-  }
+  "name": "pixel-pals-server",
+  "version": "0.1.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" }
 }
