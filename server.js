@@ -201,12 +201,46 @@ function view(code, g, uid) {
   const live = new Map([...(rooms.get(code) || new Map()).values()].map((w) => [w.uid, w.state]));   // uid -> 'online' | 'away'
   const cfg = bossCfg(g), r = bossRun.get(code), now = Date.now();
   return { code, name: g.name, owner: g.owner === uid, max: MAX, xp: (g.xp || {})[uid] || 0,
+    fx: fxPublic(g, code),
     quiz: { ...quizCfg(g), active: !!(quizRun.get(code) && quizRun.get(code).phase !== 'idle'), nextInMs: quizCfg(g).on ? Math.max(0, ((quizRun.get(code) || {}).nextAt || 0) - now) : null },
     boss: { ...cfg, active: r && r.cur ? { type: r.cur.type, leftMs: Math.max(0, r.cur.until - now) } : null, nextInMs: cfg.on && !(r && r.cur) ? Math.max(0, ((r && r.nextAt) || 0) - now) : null },
     members: g.members.map((m) => ({ uid: m.uid, name: m.name, look: m.look, owner: m.uid === g.owner, me: m.uid === uid, online: live.has(m.uid), state: live.get(m.uid) || 'offline' })) };
 }
 
+// ---- 뿌셔뿌셔 존 / 외침 단어 (방장이 실시간으로 정함) ----
+// smash: 물건이 떨어지는 뿌셔뿌셔 존 ON/OFF, density: 1(한가롭게)~3(북적북적), t0: 물건이 떨어지기 시작한 기준 시각(모두 같은 물건이 같은 때 떨어지게)
+// words: 이 단어가 들어간 채팅은 삐죽삐죽 흔들리는 말풍선으로 보임
+const fxCfg = (g) => g.fx || (g.fx = { smash: false, density: 2, t0: 0, words: [] });
+function fxCfgFrom(m, old) {
+  const out = { smash: typeof m.smash === 'boolean' ? m.smash : old.smash, density: old.density, t0: old.t0, words: old.words };
+  if (m.density !== undefined) { const d = Math.round(Number(m.density)); if (!(d >= 1 && d <= 3)) fail('밀도는 1~3 으로 정해 주세요.'); out.density = d; }
+  if (m.words !== undefined) {
+    if (!Array.isArray(m.words)) fail('단어 목록이 잘못됐어요.');
+    const ws = []; for (const w of m.words) { const t = String(w || '').trim(); if (!t) continue; if ([...t].length > 12) fail('단어는 12자까지 정할 수 있어요.'); if (!ws.includes(t)) ws.push(t); }
+    if (ws.length > 30) fail('단어는 30개까지 정할 수 있어요.'); out.words = ws;
+  }
+  if (out.smash && (!old.smash || out.density !== old.density)) out.t0 = Date.now();
+  return out;
+}
+// 상사 봉제인형: 뿌셔뿌셔 존이 켜질 때 1~2개(남자상사 m / 여자상사 f)가 나오고, 체력 50 을 친구들이 같이 깎는다 (서버가 체력을 기억; 서버를 다시 켜면 새로 나옴)
+const dollRun = new Map();                                    // code -> { list: [{id:'m'|'f', hp, x(0~1 가로 위치)}] }
+const DOLL_HP = 50, rnd1000 = () => crypto.randomInt(1000) / 1000;
+function spawnDolls(code) {
+  const two = crypto.randomInt(2) === 1;
+  const list = two ? [{ id: 'm', hp: DOLL_HP, x: 0.1 + rnd1000() * 0.3 }, { id: 'f', hp: DOLL_HP, x: 0.6 + rnd1000() * 0.3 }] : [{ id: crypto.randomInt(2) ? 'm' : 'f', hp: DOLL_HP, x: 0.2 + rnd1000() * 0.6 }];
+  dollRun.set(code, { list });
+}
+const dollsPublic = (code) => ((dollRun.get(code) || {}).list || []).map((d) => ({ id: d.id, hp: d.hp, x: Math.round(d.x * 1000) / 1000 }));
+const fxPublic = (g, code) => { const f = fxCfg(g); return { smash: !!f.smash, density: f.density, t0: f.t0, words: f.words, dolls: f.smash ? dollsPublic(code) : [] }; };
+
 const ops = {
+  fxcfg: (m) => {                             // 방장만: 뿌셔뿌셔 존 / 외침 단어. 바꾸면 접속 중인 모두에게 바로 적용
+    const uid = uidOf(m), [code, g] = getGroup(m);
+    if (g.owner !== uid) fail('방장만 할 수 있어요.');
+    const was = fxCfg(g).smash; g.fx = fxCfgFrom(m, fxCfg(g)); persist();
+    if (g.fx.smash && !was) spawnDolls(code); else if (!g.fx.smash) dollRun.delete(code);
+    broadcast(code, { t: 'fxcfg', ...fxPublic(g, code) }); return fxPublic(g, code);
+  },
   list: (m) => { const uid = uidOf(m); return [...groups].filter(([, g]) => memberOf(g, uid)).map(([c, g]) => view(c, g, uid)); },
   create: (m) => {
     const uid = uidOf(m), name = nameOf(m.name), gn = gnameOf(m.groupName);
@@ -298,6 +332,7 @@ const ops = {
     const grp = { name: gnameOf(m.groupName), owner: seen.has(m.owner) ? m.owner : members[0].uid, members };
     try { if (m.boss && typeof m.boss === 'object') grp.boss = cfgFrom(m.boss, { on: false, everyMin: 60, lastsMin: 10 }); } catch {}
     try { if (m.quiz && typeof m.quiz === 'object') grp.quiz = quizCfgFrom(m.quiz, { on: false, everyMin: 60 }); } catch {}
+    try { if (m.fx && typeof m.fx === 'object') grp.fx = fxCfgFrom(m.fx, { smash: false, density: 2, t0: 0, words: [] }); } catch {}
     groups.set(code, grp);
     persist(); return { code, restored: true };
   },
@@ -350,8 +385,9 @@ wss.on('connection', (ws) => {
       const offline = g.members.filter((x) => x.uid !== m.uid && !live.has(x.uid)).map((x) => ({ uid: x.uid, name: x.name, look: x.look }));
       r.set(ws.id, ws); rooms.set(code, r); ws.room = code; ws.uid = m.uid; ws.lastBhit = 0;
       g.xp = g.xp || {}; const mine = Math.min(MAX_XP, Math.max(0, Math.floor(Number(m.xp) || 0))); if (mine > (g.xp[m.uid] || 0)) { g.xp[m.uid] = mine; persist(); }   // 서버 데이터가 사라졌어도 내 PC 에 적어 둔 경험치로 되살림(큰 쪽을 씀)
+      if (g.fx && g.fx.smash && !dollRun.has(code)) spawnDolls(code);
       const run = bossRun.get(code), now = Date.now();
-      send(ws, { t: 'welcome', id: ws.id, peers, offline, xps: g.xp, boss: bossPublic(run && run.cur, now), bosscfg: bossCfg(g) });
+      send(ws, { t: 'welcome', id: ws.id, peers, offline, xps: g.xp, boss: bossPublic(run && run.cur, now), bosscfg: bossCfg(g), fx: fxPublic(g, code) });
       { const qr = quizRun.get(code); if (qr && qr.phase === 'invite') { send(ws, quizInvite(qr, now)); quizProg(code, qr); } }
       broadcast(code, { t: 'peer', id: ws.id, uid: m.uid, name: mem.name, look: mem.look, state: 'online', xp: g.xp[m.uid] || 0 }, ws.id);
       return;
@@ -374,6 +410,20 @@ wss.on('connection', (ws) => {
         broadcast(ws.room, { t: 'chat', id: ws.id, text, bubble: String(m.bubble || '').slice(0, 16) });
         const g = groups.get(ws.room), mem = g && memberOf(g, ws.uid); if (mem) pushMsg(ws.room, ws.uid, mem.name, text);
       }
+    } else if (m.t === 'sthrow') {                                      // 뿌셔뿌셔: 내가 k 번째 물건에 무기를 쐈다 -> 다른 사람 화면에도 같이 보이게 전달
+      const g = groups.get(ws.room), now = Date.now(), k = Number(m.k), d = m.d === 'm' || m.d === 'f' ? m.d : null; if (!g || !g.fx || !g.fx.smash || (!d && !(Number.isInteger(k) && k >= 0)) || now - (ws.lastSthrow || 0) < 100) return; ws.lastSthrow = now;
+      broadcast(ws.room, { t: 'sthrow', from: ws.id, k: d ? undefined : k, d, item: String(m.item || '').slice(0, 16) }, ws.id);
+    } else if (m.t === 'dhit') {                                        // 상사 인형을 때림: 체력은 서버가 깎고 모두에게 알림 (한 번에 최대 2마리, 0.09초에 한 번)
+      const g = groups.get(ws.room), run = dollRun.get(ws.room), now = Date.now(); if (!g || !g.fx || !g.fx.smash || !run || now - (ws.lastDhit || 0) < 90) return; ws.lastDhit = now;
+      for (const h of (Array.isArray(m.hits) ? m.hits : []).slice(0, 2)) {
+        const d = run.list.find((x) => x.id === (h && h.d)); if (!d || d.hp <= 0) continue;
+        const dmg = Math.min(d.hp, Math.min(20, Math.max(1, Math.floor(Number(h.dmg) || 1)))); d.hp -= dmg;
+        broadcast(ws.room, { t: 'dhp', d: d.id, hp: d.hp, by: ws.id, dmg });
+      }
+    } else if (m.t === 'smash') {                                       // 뿌셔뿌셔: 내 무기로 부순 물건 번호들(폭발이면 여러 개) -> 다른 사람 화면에서도 같은 물건이 부서짐
+      const g = groups.get(ws.room), now = Date.now(); if (!g || !g.fx || !g.fx.smash || now - (ws.lastSmash || 0) < 40) return;
+      const ks = (Array.isArray(m.k) ? m.k : [m.k]).slice(0, 40).map(Number).filter((k) => Number.isInteger(k) && k >= 0); if (!ks.length) return; ws.lastSmash = now;
+      broadcast(ws.room, { t: 'smash', id: ws.id, k: ks }, ws.id);
     } else if (m.t === 'bthrow') {                                      // 보스에게 던지기: 모두에게 같이 보이게 전달 (피해는 bhit 로 따로)
       const run = bossRun.get(ws.room), now = Date.now(); if (!run || !run.cur || now >= run.cur.until || now - ws.lastBthrow < 150) return; ws.lastBthrow = now;
       broadcast(ws.room, { t: 'bthrow', from: ws.id, item: String(m.item || '').slice(0, 16) });
