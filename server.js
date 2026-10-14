@@ -55,10 +55,16 @@ function drop(code, pred, type, msg) { for (const w of [...(rooms.get(code) || [
 // 그룹원들이 보낸 공격(bhit)으로 체력 100 을 깎으면 처치 -> 공격한 사람들에게 경험치. 위치/움직임은 서버가 t0, seed 만 알려 주고 각 앱이 같은 식으로 계산한다.
 const BOSS_TYPES = [['bat', 24, 120], ['liz', 22, 150], ['pig', 16, 200], ['mole', 22, 130], ['frog', 16, 140]];   // [종류, 나올 확률 가중치, 처치 경험치]
 const BOSS_HP = 100, MAX_XP = 99999;
+// ---- 차원 마왕: Lv6 이상이 3명 이상 접속해 있을 때만 나올 수 있는 특별 보스 ----
+// 체력 600, 회피 20%, 체력이 400/200 이 되면 "심판": 한 명만 남기고 전원 기절 -> 그 한 명이 문제를 맞히면 계속, 틀리거나 시간 초과면 마왕이 도망감. 경험치 2배(400), 5번 잡으면 스태프 무기 해금
+const LORD_HP = 600, LORD_EVADE = 0.2, LORD_POOL = 400, LORD_WEIGHT = 20, LORD_STEPS = [400, 200], LORD_ASK_MS = 20000, LORD_NEED_LV = 6, LORD_NEED_N = 3;
+const LV_XP = [0, 50, 125, 225, 350, 500, 700, 950, 1250, 1600];
+const lvOfXp = (xp) => { let lv = 1; while (lv < LV_XP.length && (xp || 0) >= LV_XP[lv]) lv++; return lv; };
+const lordReady = (code) => { const g = groups.get(code); if (!g) return 0; const xp = g.xp || {}; return [...liveUids(code)].filter((u) => lvOfXp(xp[u]) >= LORD_NEED_LV).length; };
 const bossRun = new Map();                                    // code -> {cur: 지금 보스, nextAt: 다음 출현 시각, dmg: Map(uid -> 준 피해), last: 마지막 일격 uid}   (저장하지 않는 실행 상태)
 const runOf = (code) => { let r = bossRun.get(code); if (!r) { r = { cur: null, nextAt: 0, dmg: new Map(), last: null }; bossRun.set(code, r); } return r; };
 const bossCfg = (g) => g.boss || (g.boss = { on: false, everyMin: 60, lastsMin: 10 });
-const bossPublic = (b, now) => (b ? { id: b.id, type: b.type, seed: b.seed, t0: b.t0, until: b.until, hp: b.hp, max: BOSS_HP, now } : null);
+const bossPublic = (b, now) => (b ? { id: b.id, type: b.type, seed: b.seed, t0: b.t0, until: b.until, hp: b.hp, max: b.max || BOSS_HP, judge: b.judge ? { wid: b.judge.wid, uid: b.judge.uid, until: b.judge.until } : null, now } : null);
 function cfgFrom(m, old) {
   const on = typeof m.on === 'boolean' ? m.on : old.on, every = Math.round(Number(m.everyMin === undefined ? old.everyMin : m.everyMin)), lasts = Math.round(Number(m.lastsMin === undefined ? old.lastsMin : m.lastsMin));
   if (!(every >= 1 && every <= 1440)) fail('출현 주기는 1분에서 24시간 사이로 정해 주세요.');
@@ -66,10 +72,14 @@ function cfgFrom(m, old) {
   return { on, everyMin: every, lastsMin: lasts };
 }
 const online = (code) => (rooms.get(code) || new Map()).size;
-function pickBoss() { let r = Math.random() * BOSS_TYPES.reduce((a, b) => a + b[1], 0); for (const b of BOSS_TYPES) { if ((r -= b[1]) < 0) return b; } return BOSS_TYPES[0]; }
-function spawnBoss(code, g) {
-  const r = runOf(code), cfg = bossCfg(g), now = Date.now(), [type] = pickBoss();
-  r.cur = { id: crypto.randomBytes(4).toString('hex'), type, seed: crypto.randomInt(1, 2147483647), t0: now, until: now + cfg.lastsMin * 60000, hp: BOSS_HP };
+function pickBoss(code, force) {
+  const list = BOSS_TYPES.slice(); if (force === 'lord' || (code && lordReady(code) >= LORD_NEED_N)) list.push(['lord', LORD_WEIGHT, LORD_POOL]);
+  if (force === 'lord') return list[list.length - 1];
+  let r = Math.random() * list.reduce((a, b) => a + b[1], 0); for (const b of list) { if ((r -= b[1]) < 0) return b; } return list[0];
+}
+function spawnBoss(code, g, force) {
+  const r = runOf(code), cfg = bossCfg(g), now = Date.now(), [type] = pickBoss(code, force), lord = type === 'lord';
+  r.cur = { id: crypto.randomBytes(4).toString('hex'), type, seed: crypto.randomInt(1, 2147483647), t0: now, until: now + cfg.lastsMin * 60000, hp: lord ? LORD_HP : BOSS_HP, max: lord ? LORD_HP : BOSS_HP, th: 0, judge: null };
   r.dmg = new Map(); r.last = null; r.nextAt = now + cfg.everyMin * 60000;
   broadcast(code, { t: 'boss', boss: bossPublic(r.cur, now) });
 }
@@ -77,21 +87,35 @@ function endBoss(code, g, reason) {
   const r = runOf(code), b = r.cur; if (!b) return; r.cur = null;
   const now = Date.now(), cfg = bossCfg(g); r.nextAt = Math.max(b.t0 + cfg.everyMin * 60000, now + 5000);
   if (reason !== 'dead') return broadcast(code, { t: 'bossend', id: b.id, reason });
-  const pool = (BOSS_TYPES.find((x) => x[0] === b.type) || BOSS_TYPES[0])[2], total = [...r.dmg.values()].reduce((a, c) => a + c, 0) || 1, rewards = [];
+  const pool = b.type === 'lord' ? LORD_POOL : (BOSS_TYPES.find((x) => x[0] === b.type) || BOSS_TYPES[0])[2], total = [...r.dmg.values()].reduce((a, c) => a + c, 0) || 1, rewards = [];
   g.xp = g.xp || {};
   for (const [uid, d] of r.dmg) {
     const mem = memberOf(g, uid); if (!mem) continue;
     const gain = Math.round(pool * (0.4 + 0.6 * (d / total)) + (uid === r.last ? pool * 0.15 : 0));       // 싸운 사람은 최소 40%, 준 피해 비율만큼 더, 마지막 일격은 +15%
-    g.xp[uid] = Math.min(MAX_XP, (g.xp[uid] || 0) + gain); rewards.push({ uid, name: mem.name, dmg: d, gain, xp: g.xp[uid] });
+    g.xp[uid] = Math.min(MAX_XP, (g.xp[uid] || 0) + gain); const rw = { uid, name: mem.name, dmg: d, gain, xp: g.xp[uid] };
+    if (b.type === 'lord') { g.lordKills = g.lordKills || {}; rw.kills = g.lordKills[uid] = (g.lordKills[uid] || 0) + 1; }      // 마왕을 때려 본 사람은 처치 1회로 센다
+    rewards.push(rw);
   }
   rewards.sort((a, c) => c.dmg - a.dmg); persist();
   broadcast(code, { t: 'bossend', id: b.id, reason: 'dead', type: b.type, last: r.last, rewards });
+}
+function startJudge(code, g) {                                   // 마왕 심판: 접속자 중 한 명이 답하는 사람, 나머지는 기절
+  const b = runOf(code).cur, all = [...(rooms.get(code) || new Map()).values()], act = all.filter((w) => w.state !== 'away'), ws = act.length ? act : all; if (!b || !ws.length) return;   // 자리 비운 사람보다 지금 보고 있는 사람을 먼저 뽑음
+  const w = ws[crypto.randomInt(ws.length)], qi = crypto.randomInt(QUIZ_BANK.length), q = QUIZ_BANK[qi], now = Date.now();
+  b.judge = { uid: w.uid, wid: w.id, qi, until: now + LORD_ASK_MS, start: now };
+  broadcast(code, { t: 'bjudge', id: b.id, hp: b.hp, wid: w.id, uid: w.uid, name: (memberOf(g, w.uid) || {}).name || '', until: b.judge.until, now });
+  send(w, { t: 'bq', id: b.id, topicName: QUIZ_TOPICS[q.t], text: q.q, choices: q.c, until: b.judge.until, now });
+}
+function judgeFail(code, g, why) {
+  const b = runOf(code).cur; if (!b || !b.judge) return; const q = QUIZ_BANK[b.judge.qi];
+  broadcast(code, { t: 'bjres', id: b.id, ok: false, why, correct: q.a }); endBoss(code, g, 'flee');
 }
 setInterval(() => {                                           // 1초마다: 출현 시각이 됐는지 / 머무는 시간이 끝났는지
   const now = Date.now();
   for (const [code, g] of groups) {
     const cfg = g.boss, r = bossRun.get(code);
-    if (r && r.cur && now >= r.cur.until) endBoss(code, g, 'time');
+    if (r && r.cur && r.cur.judge && now > r.cur.judge.until + 500) judgeFail(code, g, 'timeout');
+    else if (r && r.cur && !r.cur.judge && now >= r.cur.until) endBoss(code, g, 'time');
     if (!cfg || !cfg.on) continue; const rr = runOf(code);
     if (!rr.cur && now >= rr.nextAt) { if (online(code)) spawnBoss(code, g); else rr.nextAt = now + cfg.everyMin * 60000; }   // 아무도 접속 안 했으면 이번 차례는 건너뜀
   }
@@ -200,10 +224,10 @@ const memberOf = (g, uid) => g.members.find((x) => x.uid === uid);
 function view(code, g, uid) {
   const live = new Map([...(rooms.get(code) || new Map()).values()].map((w) => [w.uid, w.state]));   // uid -> 'online' | 'away'
   const cfg = bossCfg(g), r = bossRun.get(code), now = Date.now();
-  return { code, name: g.name, owner: g.owner === uid, max: MAX, xp: (g.xp || {})[uid] || 0,
+  return { code, name: g.name, owner: g.owner === uid, max: MAX, xp: (g.xp || {})[uid] || 0, lordKills: (g.lordKills || {})[uid] || 0,
     fx: fxPublic(g, code),
     quiz: { ...quizCfg(g), active: !!(quizRun.get(code) && quizRun.get(code).phase !== 'idle'), nextInMs: quizCfg(g).on ? Math.max(0, ((quizRun.get(code) || {}).nextAt || 0) - now) : null },
-    boss: { ...cfg, active: r && r.cur ? { type: r.cur.type, leftMs: Math.max(0, r.cur.until - now) } : null, nextInMs: cfg.on && !(r && r.cur) ? Math.max(0, ((r && r.nextAt) || 0) - now) : null },
+    boss: { ...cfg, lordReady: lordReady(code), lordNeed: LORD_NEED_N, lordLv: LORD_NEED_LV, active: r && r.cur ? { type: r.cur.type, leftMs: Math.max(0, r.cur.until - now) } : null, nextInMs: cfg.on && !(r && r.cur) ? Math.max(0, ((r && r.nextAt) || 0) - now) : null },
     members: g.members.map((m) => ({ uid: m.uid, name: m.name, look: m.look, owner: m.uid === g.owner, me: m.uid === uid, online: live.has(m.uid), state: live.get(m.uid) || 'offline' })) };
 }
 
@@ -302,7 +326,8 @@ const ops = {
     if (!bossCfg(g).on) fail('보스가 꺼져 있어요. 먼저 켜 주세요.');
     if (runOf(code).cur) fail('이미 보스가 있어요.');
     if (!online(code)) fail('접속 중인 멤버가 없어서 소환할 수 없어요.');
-    spawnBoss(code, g); return {};
+    if (m.lord) { if (lordReady(code) < LORD_NEED_N) fail(`Lv${LORD_NEED_LV} 이상이 ${LORD_NEED_N}명 이상 접속해 있어야 마왕이 나와요.`); spawnBoss(code, g, 'lord'); } else spawnBoss(code, g);
+    return {};
   },
   quizcfg: (m) => {                           // 방장만: 랜덤퀴즈 ON/OFF, 주기(분)
     const uid = uidOf(m), [code, g] = getGroup(m);
@@ -385,9 +410,10 @@ wss.on('connection', (ws) => {
       const offline = g.members.filter((x) => x.uid !== m.uid && !live.has(x.uid)).map((x) => ({ uid: x.uid, name: x.name, look: x.look }));
       r.set(ws.id, ws); rooms.set(code, r); ws.room = code; ws.uid = m.uid; ws.lastBhit = 0;
       g.xp = g.xp || {}; const mine = Math.min(MAX_XP, Math.max(0, Math.floor(Number(m.xp) || 0))); if (mine > (g.xp[m.uid] || 0)) { g.xp[m.uid] = mine; persist(); }   // 서버 데이터가 사라졌어도 내 PC 에 적어 둔 경험치로 되살림(큰 쪽을 씀)
+      { g.lordKills = g.lordKills || {}; const lk = Math.min(999, Math.max(0, Math.floor(Number(m.lk) || 0))); if (lk > (g.lordKills[m.uid] || 0)) { g.lordKills[m.uid] = lk; persist(); } }   // 마왕 처치 횟수도 내 PC 기록과 비교해 큰 쪽
       if (g.fx && g.fx.smash && !dollRun.has(code)) spawnDolls(code);
       const run = bossRun.get(code), now = Date.now();
-      send(ws, { t: 'welcome', id: ws.id, peers, offline, xps: g.xp, boss: bossPublic(run && run.cur, now), bosscfg: bossCfg(g), fx: fxPublic(g, code) });
+      send(ws, { t: 'welcome', id: ws.id, peers, offline, xps: g.xp, lks: g.lordKills || {}, boss: bossPublic(run && run.cur, now), bosscfg: bossCfg(g), fx: fxPublic(g, code) });
       { const qr = quizRun.get(code); if (qr && qr.phase === 'invite') { send(ws, quizInvite(qr, now)); quizProg(code, qr); } }
       broadcast(code, { t: 'peer', id: ws.id, uid: m.uid, name: mem.name, look: mem.look, state: 'online', xp: g.xp[m.uid] || 0 }, ws.id);
       return;
@@ -430,10 +456,25 @@ wss.on('connection', (ws) => {
     } else if (m.t === 'bhit') {                                        // 공격이 보스에게 맞음: 맞춘 쪽 앱이 알려 줌. 피해 1~10 으로 제한, 연속 요청은 제한
       const run = bossRun.get(ws.room), now = Date.now(), g = groups.get(ws.room);
       if (!run || !run.cur || !g || run.cur.id !== String(m.id) || now >= run.cur.until || run.cur.hp <= 0 || now - ws.lastBhit < 120) return; ws.lastBhit = now;
-      const dmg = Math.min(run.cur.hp, Math.min(20, Math.max(1, Math.floor(Number(m.dmg) || 1))));
+      const lord = run.cur.type === 'lord'; if (lord && run.cur.judge) return;                     // 심판 중에는 피해 없음
+      if (lord && Math.random() < LORD_EVADE) return broadcast(ws.room, { t: 'bmiss', id: run.cur.id, by: ws.id });   // 마왕은 20% 회피
+      let dmg = Math.min(run.cur.hp, Math.min(20, Math.max(1, Math.floor(Number(m.dmg) || 1))));
+      const step = lord ? LORD_STEPS[run.cur.th] : undefined; if (step !== undefined && run.cur.hp - dmg < step) dmg = run.cur.hp - step;   // 400/200 에서 멈춤
       run.cur.hp -= dmg; run.dmg.set(ws.uid, (run.dmg.get(ws.uid) || 0) + dmg); run.last = ws.uid;
       broadcast(ws.room, { t: 'bhp', id: run.cur.id, hp: run.cur.hp, by: ws.id, dmg });
       if (run.cur.hp <= 0) endBoss(ws.room, g, 'dead');
+      else if (step !== undefined && run.cur.hp <= step) { run.cur.th++; startJudge(ws.room, g); }
+    } else if (m.t === 'lans') {                                       // 마왕 문제 답 (심판받는 한 명만)
+      const run = bossRun.get(ws.room), g = groups.get(ws.room), c = Number(m.c), j = run && run.cur && run.cur.judge;
+      if (!j || !g || run.cur.id !== String(m.id) || j.uid !== ws.uid || !(c >= 0 && c <= 3)) return;
+      if (Date.now() > j.until + 500) return judgeFail(ws.room, g, 'timeout');
+      const q = QUIZ_BANK[j.qi];
+      if (Math.floor(c) !== q.a) return judgeFail(ws.room, g, 'wrong');
+      run.cur.until += Date.now() - j.start; run.cur.judge = null;                                // 심판 시간만큼 머무는 시간 연장
+      broadcast(ws.room, { t: 'bjres', id: run.cur.id, ok: true, correct: q.a, until: run.cur.until });
+    } else if (m.t === 'lhit') {                                       // 마왕 주먹에 내가 맞음(맞은 사람 앱이 판정) -> 모두에게 날아가고 기절하는 모습 전달
+      const run = bossRun.get(ws.room), now = Date.now(); if (!run || !run.cur || run.cur.type !== 'lord' || run.cur.judge || run.cur.id !== String(m.id) || now - (ws.lastLhit || 0) < 1200) return; ws.lastLhit = now;
+      broadcast(ws.room, { t: 'lhit', id: run.cur.id, who: ws.id, dir: m.dir === -1 ? -1 : 1 }, ws.id);
     } else if (m.t === 'qjoin') {                                      // 퀴즈 참여 수락/거절 (초대 중에만). 지금 접속한 사람이 모두 정하면 바로 시작
       const r = quizRun.get(ws.room), g = groups.get(ws.room); if (!r || !g || r.phase !== 'invite' || r.id !== String(m.id)) return;
       r.resp.set(ws.uid, !!m.yes);
@@ -454,6 +495,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const r = rooms.get(ws.room); if (!r) return;
     r.delete(ws.id);
+    { const run = bossRun.get(ws.room), gg = groups.get(ws.room); if (run && run.cur && run.cur.judge && run.cur.judge.uid === ws.uid && gg) judgeFail(ws.room, gg, 'left'); }
     const g = groups.get(ws.room), member = !!(g && memberOf(g, ws.uid));
     if (!r.size) rooms.delete(ws.room); else broadcast(ws.room, { t: 'leave', id: ws.id, uid: ws.uid, member });
   });
