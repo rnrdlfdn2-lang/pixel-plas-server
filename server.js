@@ -208,18 +208,18 @@ function view(code, g, uid) {
 }
 
 // ---- 뿌셔뿌셔 존 / 외침 단어 (방장이 실시간으로 정함) ----
-// smash: 물건이 떨어지는 뿌셔뿌셔 존 ON/OFF, density: 1(한가롭게)~3(북적북적), t0: 물건이 떨어지기 시작한 기준 시각(모두 같은 물건이 같은 때 떨어지게)
+// smash: 물건이 떨어지는 뿌셔뿌셔 존 ON/OFF, rate: 속도 게이지 0(느림, 4.5초에 1개)~100(최대, 0.1초에 1개), t0: 물건이 떨어지기 시작한 기준 시각(모두 같은 물건이 같은 때 떨어지게)
 // words: 이 단어가 들어간 채팅은 삐죽삐죽 흔들리는 말풍선으로 보임
-const fxCfg = (g) => g.fx || (g.fx = { smash: false, density: 2, t0: 0, words: [] });
+const fxCfg = (g) => g.fx || (g.fx = { smash: false, rate: 25, t0: 0, words: [] });
 function fxCfgFrom(m, old) {
-  const out = { smash: typeof m.smash === 'boolean' ? m.smash : old.smash, density: old.density, t0: old.t0, words: old.words };
-  if (m.density !== undefined) { const d = Math.round(Number(m.density)); if (!(d >= 1 && d <= 3)) fail('밀도는 1~3 으로 정해 주세요.'); out.density = d; }
+  const out = { smash: typeof m.smash === 'boolean' ? m.smash : old.smash, rate: old.rate === undefined ? 25 : old.rate, t0: old.t0, words: old.words };
+  if (m.rate !== undefined) { const d = Math.round(Number(m.rate)); if (!(d >= 0 && d <= 100)) fail('속도는 0~100 으로 정해 주세요.'); out.rate = d; }
   if (m.words !== undefined) {
     if (!Array.isArray(m.words)) fail('단어 목록이 잘못됐어요.');
     const ws = []; for (const w of m.words) { const t = String(w || '').trim(); if (!t) continue; if ([...t].length > 12) fail('단어는 12자까지 정할 수 있어요.'); if (!ws.includes(t)) ws.push(t); }
     if (ws.length > 30) fail('단어는 30개까지 정할 수 있어요.'); out.words = ws;
   }
-  if (out.smash && (!old.smash || out.density !== old.density)) out.t0 = Date.now();
+  if (out.smash && (!old.smash || out.rate !== (old.rate === undefined ? 25 : old.rate))) out.t0 = Date.now();
   return out;
 }
 // 상사 봉제인형: 뿌셔뿌셔 존이 켜질 때 1~2개(남자상사 m / 여자상사 f)가 나오고, 체력 50 을 친구들이 같이 깎는다 (서버가 체력을 기억; 서버를 다시 켜면 새로 나옴)
@@ -231,7 +231,7 @@ function spawnDolls(code) {
   dollRun.set(code, { list });
 }
 const dollsPublic = (code) => ((dollRun.get(code) || {}).list || []).map((d) => ({ id: d.id, hp: d.hp, x: Math.round(d.x * 1000) / 1000 }));
-const fxPublic = (g, code) => { const f = fxCfg(g); return { smash: !!f.smash, density: f.density, t0: f.t0, words: f.words, dolls: f.smash ? dollsPublic(code) : [] }; };
+const fxPublic = (g, code) => { const f = fxCfg(g); return { smash: !!f.smash, rate: f.rate === undefined ? 25 : f.rate, t0: f.t0, words: f.words, dolls: f.smash ? dollsPublic(code) : [] }; };
 
 const ops = {
   fxcfg: (m) => {                             // 방장만: 뿌셔뿌셔 존 / 외침 단어. 바꾸면 접속 중인 모두에게 바로 적용
@@ -332,7 +332,7 @@ const ops = {
     const grp = { name: gnameOf(m.groupName), owner: seen.has(m.owner) ? m.owner : members[0].uid, members };
     try { if (m.boss && typeof m.boss === 'object') grp.boss = cfgFrom(m.boss, { on: false, everyMin: 60, lastsMin: 10 }); } catch {}
     try { if (m.quiz && typeof m.quiz === 'object') grp.quiz = quizCfgFrom(m.quiz, { on: false, everyMin: 60 }); } catch {}
-    try { if (m.fx && typeof m.fx === 'object') grp.fx = fxCfgFrom(m.fx, { smash: false, density: 2, t0: 0, words: [] }); } catch {}
+    try { if (m.fx && typeof m.fx === 'object') grp.fx = fxCfgFrom(m.fx, { smash: false, rate: 25, t0: 0, words: [] }); } catch {}
     groups.set(code, grp);
     persist(); return { code, restored: true };
   },
