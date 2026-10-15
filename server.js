@@ -57,7 +57,7 @@ const BOSS_TYPES = [['bat', 24, 120], ['liz', 22, 150], ['pig', 16, 200], ['mole
 const BOSS_HP = 100, MAX_XP = 99999;
 // ---- 차원 마왕: Lv6 이상이 3명 이상 접속해 있을 때만 나올 수 있는 특별 보스 ----
 // 체력 600, 회피 20%, 체력이 400/200 이 되면 "심판": 한 명만 남기고 전원 기절 -> 그 한 명이 문제를 맞히면 계속, 틀리거나 시간 초과면 마왕이 도망감. 경험치 2배(400), 5번 잡으면 스태프 무기 해금
-const LORD_HP = 600, LORD_EVADE = 0.2, LORD_POOL = 400, LORD_WEIGHT = 20, LORD_STEPS = [400, 200], LORD_ASK_MS = 20000, LORD_NEED_LV = 6, LORD_NEED_N = 3;
+const LORD_HP = 600, LORD_EVADE = 0.2, LORD_POOL = 400, LORD_WEIGHT = 20, LORD_STEPS = [400, 200], LORD_ASK_MS = 20000, LORD_HEAL = 0.3, LORD_NEED_LV = 6, LORD_NEED_N = 3;
 const LV_XP = [0, 50, 125, 225, 350, 500, 700, 950, 1250, 1600];
 const lvOfXp = (xp) => { let lv = 1; while (lv < LV_XP.length && (xp || 0) >= LV_XP[lv]) lv++; return lv; };
 const lordReady = (code) => { const g = groups.get(code); if (!g) return 0; const xp = g.xp || {}; return [...liveUids(code)].filter((u) => lvOfXp(xp[u]) >= LORD_NEED_LV).length; };
@@ -100,15 +100,14 @@ function endBoss(code, g, reason) {
   broadcast(code, { t: 'bossend', id: b.id, reason: 'dead', type: b.type, last: r.last, rewards });
 }
 function startJudge(code, g) {                                   // 마왕 심판: 접속자 중 한 명이 답하는 사람, 나머지는 기절
-  const b = runOf(code).cur, all = [...(rooms.get(code) || new Map()).values()], act = all.filter((w) => w.state !== 'away'), ws = act.length ? act : all; if (!b || !ws.length) return;   // 자리 비운 사람보다 지금 보고 있는 사람을 먼저 뽑음
+  const b = runOf(code).cur, all = [...(rooms.get(code) || new Map()).values()], act = all.filter((w) => w.state !== 'away'), pool0 = act.length ? act : all, fresh = pool0.filter((w) => w.uid !== b.lastAns), ws = fresh.length ? fresh : pool0; if (!b || !ws.length) return;   // 문제마다 새로 뽑되, 가능하면 바로 전에 푼 사람은 빼고   // 자리 비운 사람보다 지금 보고 있는 사람을 먼저 뽑음
   const w = ws[crypto.randomInt(ws.length)], qi = crypto.randomInt(QUIZ_BANK.length), q = QUIZ_BANK[qi], now = Date.now();
-  b.judge = { uid: w.uid, wid: w.id, qi, until: now + LORD_ASK_MS, start: now };
-  broadcast(code, { t: 'bjudge', id: b.id, hp: b.hp, wid: w.id, uid: w.uid, name: (memberOf(g, w.uid) || {}).name || '', until: b.judge.until, now });
-  send(w, { t: 'bq', id: b.id, topicName: QUIZ_TOPICS[q.t], text: q.q, choices: q.c, until: b.judge.until, now });
+  b.judge = { uid: w.uid, wid: w.id, qi, until: now + LORD_ASK_MS, start: now }; b.lastAns = w.uid;
+  broadcast(code, { t: 'bjudge', id: b.id, hp: b.hp, wid: w.id, uid: w.uid, name: (memberOf(g, w.uid) || {}).name || '', until: b.judge.until, now, q: { topicName: QUIZ_TOPICS[q.t], text: q.q, choices: q.c } });   // 문제는 모두에게 보임 (정답은 안 보냄)
 }
-function judgeFail(code, g, why) {
+function judgeFail(code, g, why, picked) {
   const b = runOf(code).cur; if (!b || !b.judge) return; const q = QUIZ_BANK[b.judge.qi];
-  broadcast(code, { t: 'bjres', id: b.id, ok: false, why, correct: q.a }); endBoss(code, g, 'flee');
+  broadcast(code, { t: 'bjres', id: b.id, ok: false, why, correct: q.a, picked: picked === undefined ? null : picked }); endBoss(code, g, 'flee');
 }
 setInterval(() => {                                           // 1초마다: 출현 시각이 됐는지 / 머무는 시간이 끝났는지
   const now = Date.now();
@@ -461,7 +460,9 @@ wss.on('connection', (ws) => {
       let dmg = Math.min(run.cur.hp, Math.min(20, Math.max(1, Math.floor(Number(m.dmg) || 1))));
       const step = lord ? LORD_STEPS[run.cur.th] : undefined; if (step !== undefined && run.cur.hp - dmg < step) dmg = run.cur.hp - step;   // 400/200 에서 멈춤
       run.cur.hp -= dmg; run.dmg.set(ws.uid, (run.dmg.get(ws.uid) || 0) + dmg); run.last = ws.uid;
-      broadcast(ws.room, { t: 'bhp', id: run.cur.id, hp: run.cur.hp, by: ws.id, dmg });
+      let heal = 0;                                                                              // 마왕은 공격이 성공할 때마다 피해의 일부를 회복 (이미 지나온 400/200 선 위로는 안 올라감)
+      if (lord && run.cur.hp > 0 && !(step !== undefined && run.cur.hp <= step)) { const cap = run.cur.th > 0 ? LORD_STEPS[run.cur.th - 1] : run.cur.max; heal = Math.max(0, Math.min(Math.ceil(dmg * LORD_HEAL), cap - run.cur.hp)); run.cur.hp += heal; }
+      broadcast(ws.room, { t: 'bhp', id: run.cur.id, hp: run.cur.hp, by: ws.id, dmg, heal });
       if (run.cur.hp <= 0) endBoss(ws.room, g, 'dead');
       else if (step !== undefined && run.cur.hp <= step) { run.cur.th++; startJudge(ws.room, g); }
     } else if (m.t === 'lans') {                                       // 마왕 문제 답 (심판받는 한 명만)
@@ -469,9 +470,9 @@ wss.on('connection', (ws) => {
       if (!j || !g || run.cur.id !== String(m.id) || j.uid !== ws.uid || !(c >= 0 && c <= 3)) return;
       if (Date.now() > j.until + 500) return judgeFail(ws.room, g, 'timeout');
       const q = QUIZ_BANK[j.qi];
-      if (Math.floor(c) !== q.a) return judgeFail(ws.room, g, 'wrong');
+      if (Math.floor(c) !== q.a) return judgeFail(ws.room, g, 'wrong', Math.floor(c));
       run.cur.until += Date.now() - j.start; run.cur.judge = null;                                // 심판 시간만큼 머무는 시간 연장
-      broadcast(ws.room, { t: 'bjres', id: run.cur.id, ok: true, correct: q.a, until: run.cur.until });
+      broadcast(ws.room, { t: 'bjres', id: run.cur.id, ok: true, correct: q.a, picked: Math.floor(c), until: run.cur.until });
     } else if (m.t === 'lhit') {                                       // 마왕 주먹에 내가 맞음(맞은 사람 앱이 판정) -> 모두에게 날아가고 기절하는 모습 전달
       const run = bossRun.get(ws.room), now = Date.now(); if (!run || !run.cur || run.cur.type !== 'lord' || run.cur.judge || run.cur.id !== String(m.id) || now - (ws.lastLhit || 0) < 1200) return; ws.lastLhit = now;
       broadcast(ws.room, { t: 'lhit', id: run.cur.id, who: ws.id, dir: m.dir === -1 ? -1 : 1 }, ws.id);
