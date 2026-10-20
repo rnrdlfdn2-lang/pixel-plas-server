@@ -333,6 +333,12 @@ const ops = {
     if (m.lord) { if (lordReady(code) < LORD_NEED_N) fail(`Lv${LORD_NEED_LV} 이상이 ${LORD_NEED_N}명 이상 접속해 있어야 마왕이 나와요.`); spawnBoss(code, g, 'lord'); } else spawnBoss(code, g);
     return {};
   },
+  updnotify: (m) => {                         // 방장만: 접속 중인 그룹원 앱들에게 "새 버전 확인해 보세요" 신호 (1분에 한 번)
+    const uid = uidOf(m), [code, g] = getGroup(m);
+    if (g.owner !== uid) fail('방장만 할 수 있어요.');
+    const now = Date.now(), r = runOf(code); if (now - (r.lastUpd || 0) < 60000) fail('방금 보냈어요. 1분 뒤에 다시 보낼 수 있어요.');
+    r.lastUpd = now; const sent = online(code); broadcast(code, { t: 'updnow' }); return { sent };
+  },
   quizcfg: (m) => {                           // 방장만: 랜덤퀴즈 ON/OFF, 주기(분)
     const uid = uidOf(m), [code, g] = getGroup(m);
     if (g.owner !== uid) fail('방장만 할 수 있어요.');
