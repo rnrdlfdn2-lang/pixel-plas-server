@@ -57,7 +57,7 @@ const BOSS_TYPES = [['bat', 24, 120], ['liz', 22, 150], ['pig', 16, 200], ['mole
 const BOSS_HP = 100, MAX_XP = 99999;
 // ---- 차원 마왕: Lv6 이상이 3명 이상 접속해 있을 때만 나올 수 있는 특별 보스 ----
 // 체력 600, 회피 20%, 체력이 400/200 이 되면 "심판": 한 명만 남기고 전원 기절 -> 그 한 명이 문제를 맞히면 계속, 틀리거나 시간 초과면 마왕이 도망감. 경험치 2배(400), 5번 잡으면 스태프 무기 해금
-const LORD_HP = 600, LORD_EVADE = 0.2, LORD_POOL = 400, LORD_WEIGHT = 20, LORD_STEPS = [400, 200], LORD_ASK_MS = 30000, LORD_HEAL = 0.3, LORD_NEED_LV = 6, LORD_NEED_N = 1;
+const LORD_HP = 1200, LORD_EVADE = 0.3, LORD_POOL = 400, LORD_WEIGHT = 20, LORD_STEPS = [900, 600, 300], LORD_BAR_MIN = 5000, LORD_BAR_MAX = 10000, LORD_BAR_MS = 1000, LORD_BAR_HEAL = 2, LORD_ASK_MS = 30000, LORD_HEAL = 0.3, LORD_NEED_LV = 6, LORD_NEED_N = 1;
 const LV_XP = [0, 50, 125, 225, 350, 500, 700, 950, 1250, 1600];
 const lvOfXp = (xp) => { let lv = 1; while (lv < LV_XP.length && (xp || 0) >= LV_XP[lv]) lv++; return lv; };
 const lordReady = (code) => { const g = groups.get(code); if (!g) return 0; const xp = g.xp || {}; return [...liveUids(code)].filter((u) => lvOfXp(xp[u]) >= LORD_NEED_LV).length; };
@@ -82,9 +82,11 @@ function spawnBoss(code, g, force) {
   r.cur = { id: crypto.randomBytes(4).toString('hex'), type, seed: crypto.randomInt(1, 2147483647), t0: now, until: now + cfg.lastsMin * 60000, hp: lord ? LORD_HP : BOSS_HP, max: lord ? LORD_HP : BOSS_HP, th: 0, judge: null };
   r.dmg = new Map(); r.last = null; r.nextAt = now + cfg.everyMin * 60000;
   broadcast(code, { t: 'boss', boss: bossPublic(r.cur, now) });
+  if (lord) { const b = r.cur, tick = () => {                         // 마왕의 배리어: 5~10초마다 1초 동안 생김 (이때 맞으면 피해 대신 회복)
+    b.barT = setTimeout(() => { if (r.cur !== b || Date.now() >= b.until) return; const n = Date.now(); b.barUntil = n + LORD_BAR_MS; if (!b.judge) broadcast(code, { t: 'bbar', id: b.id, until: b.barUntil, now: n }); tick(); }, LORD_BAR_MIN + Math.random() * (LORD_BAR_MAX - LORD_BAR_MIN)); }; tick(); }
 }
 function endBoss(code, g, reason) {
-  const r = runOf(code), b = r.cur; if (!b) return; r.cur = null;
+  const r = runOf(code), b = r.cur; if (!b) return; r.cur = null; clearTimeout(b.barT);
   const now = Date.now(), cfg = bossCfg(g); r.nextAt = Math.max(b.t0 + cfg.everyMin * 60000, now + 5000);
   if (reason !== 'dead') return broadcast(code, { t: 'bossend', id: b.id, reason });
   const pool = b.type === 'lord' ? LORD_POOL : (BOSS_TYPES.find((x) => x[0] === b.type) || BOSS_TYPES[0])[2], total = [...r.dmg.values()].reduce((a, c) => a + c, 0) || 1, rewards = [];
@@ -468,6 +470,10 @@ wss.on('connection', (ws) => {
       if (!run || !run.cur || !g || run.cur.id !== String(m.id) || now >= run.cur.until || run.cur.hp <= 0 || now - ws.lastBhit < 120) return; ws.lastBhit = now;
       const lord = run.cur.type === 'lord'; if (lord && run.cur.judge) return;                     // 심판 중에는 피해 없음
       if (lord && Math.random() < LORD_EVADE) return broadcast(ws.room, { t: 'bmiss', id: run.cur.id, by: ws.id });   // 마왕은 20% 회피
+      if (lord && now < (run.cur.barUntil || 0)) {                                                // 배리어 중에 맞으면 피해 대신 회복
+        const d0 = Math.min(20, Math.max(1, Math.floor(Number(m.dmg) || 1))), cap = run.cur.th > 0 ? LORD_STEPS[run.cur.th - 1] : run.cur.max, heal = Math.max(0, Math.min(d0 * LORD_BAR_HEAL, cap - run.cur.hp)); run.cur.hp += heal;
+        return broadcast(ws.room, { t: 'bhp', id: run.cur.id, hp: run.cur.hp, by: ws.id, dmg: 0, heal, barrier: true });
+      }
       let dmg = Math.min(run.cur.hp, Math.min(20, Math.max(1, Math.floor(Number(m.dmg) || 1))));
       const step = lord ? LORD_STEPS[run.cur.th] : undefined; if (step !== undefined && run.cur.hp - dmg < step) dmg = run.cur.hp - step;   // 400/200 에서 멈춤
       run.cur.hp -= dmg; run.dmg.set(ws.uid, (run.dmg.get(ws.uid) || 0) + dmg); run.last = ws.uid;
